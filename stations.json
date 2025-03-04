@@ -1,0 +1,19 @@
+{
+    "stations": [
+        {
+            "id": "PAUA2",
+            "name": "St. Paul",
+            "source_45day": "https://www.ndbc.noaa.gov/data/realtime2/PAUA2.txt"
+        },
+        {
+            "id": "SGXA2",
+            "name": "St. George",
+            "source_45day": "https://www.ndbc.noaa.gov/data/realtime2/SGXA2.txt"
+        }
+    ],
+    "output": {
+        "current": {
+            "update_interval": 600
+        }
+    }
+}
