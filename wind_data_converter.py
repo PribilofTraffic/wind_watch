@@ -40,7 +40,7 @@ def get_time(for_display=False, dt=None):
 def load_config():
     """Load station configuration from JSON file."""
     try:
-        config_path = os.path.join(os.path.dirname(__file__), 'config', 'stations.json')
+        config_path = os.path.join('/app/config/stations.json')
         with open(config_path, 'r') as f:
             config = json.load(f)
             logger.info("Successfully loaded station configuration")
@@ -149,16 +149,7 @@ def process_45day_data(url, station_id):
         return []
 
 def get_daily_statistics(data):
-    """
-    Calculate comprehensive daily statistics for AKST days.
-    
-    Tracks:
-    - Highest wind speed (with timestamp)
-    - Highest gust (with timestamp)
-    - Highest temperature (with timestamp)
-    - Lowest temperature (with timestamp)
-    - Lowest wind chill (with timestamp)
-    """
+    """Calculate comprehensive daily statistics for AKST days."""
     daily_stats = {}
     
     for entry in data:
@@ -218,164 +209,126 @@ def get_daily_statistics(data):
     
     return daily_stats
 
-def is_akst_midnight(utc_time):
-    """
-    Check if the given UTC time corresponds to midnight in AKST.
-    AKST is UTC-9.
-    """
-    akst_time = utc_time - timedelta(hours=9)
-    return akst_time.hour == 0 and akst_time.minute == 0
+def save_station_data(station_id, name, new_data):
+    """Save station data to wind_watch/2025 JSON file with comprehensive daily statistics."""
+    try:
+        # Ensure the wind_watch directory exists
+        data_dir = os.path.join('/app/data/wind_watch/2025')
+        os.makedirs(data_dir, exist_ok=True)
+
+        # Save the data
+        data_file = os.path.join(data_dir, f"{station_id}.json")
+        
+        # Calculate daily statistics
+        daily_stats = get_daily_statistics(new_data)
+        
+        # Get the latest entry
+        latest_entry = new_data[-1] if new_data else None
+        
+        # Create the output data structure
+        output_data = {
+            'station': {
+                'id': station_id,
+                'name': name
+            },
+            'last_update': get_time(for_display=True)['timestamp'],
+            'current': latest_entry,
+            'daily_stats': daily_stats
+        }
+        
+        with open(data_file, 'w') as f:
+            json.dump(output_data, f, indent=2)
+        
+        logger.info(f"Saved {len(new_data)} entries to {data_file}")
+        return daily_stats
+    except Exception as e:
+        logger.error(f"Failed to save station data: {str(e)}")
+        raise
 
 def save_daily_statistics(station_id, name, date, daily_stats):
+    """Save daily statistics to a JSON file in the format:
+    wind_watch/daily/2025/[station_id]_[YYYY-MM-DD].json
     """
-    Save daily statistics to a JSON file in the format:
-    data/daily/2025/[station_id]_[YYYY-MM-DD].json
-    """
-    year = date.split('-')[0]
-    output_dir = os.path.join(os.environ.get('DATA_DIR', os.path.join(os.path.dirname(__file__), 'data')), 'daily', year)
-    os.makedirs(output_dir, exist_ok=True)
-    
-    output_file = os.path.join(output_dir, f"{station_id}_{date}.json")
-    
-    output_data = {
-        "station": station_id,
-        "name": name,
-        "date": date,
-        "statistics": daily_stats
-    }
-    
-    with open(output_file, 'w') as f:
-        json.dump(output_data, f, indent=2)
-    
-    logger.info(f"Saved daily statistics for {station_id} on {date}")
-
-def save_station_data(station_id, name, new_data):
-    """Save station data to 2025 JSON file with comprehensive daily statistics."""
-    output_dir = os.path.join(os.environ.get('DATA_DIR', os.path.join(os.path.dirname(__file__), 'data')), '2025')
-    os.makedirs(output_dir, exist_ok=True)
-    output_file = os.path.join(output_dir, f"{station_id}.json")
-    
-    # Load existing data and daily statistics
-    existing_data = []
-    current_daily_stats = {}
-    
     try:
-        with open(output_file, 'r') as f:
-            existing = json.load(f)
-            existing_data = existing.get('data', [])
-            current_daily_stats = existing.get('daily_statistics', {})
-            logger.info(f"Loaded {len(existing_data)} existing entries for {station_id}")
-    except (FileNotFoundError, json.JSONDecodeError):
-        logger.info(f"No existing data found for {station_id}, starting fresh")
-    
-    # Merge data, with error handling for missing 'utc'
-    existing_dict = {}
-    for entry in existing_data:
-        if 'utc' not in entry:
-            logger.error(f"Invalid existing entry for {station_id}, missing 'utc': {entry}")
-            continue
-        existing_dict[entry['utc']] = entry
-    
-    for entry in new_data:
-        if 'utc' not in entry:
-            logger.error(f"Invalid new entry for {station_id}, missing 'utc': {entry}")
-            continue
-        existing_dict[entry['utc']] = entry
-    
-    merged_data = list(existing_dict.values())
-    merged_data.sort(key=lambda x: x['utc'])
-    
-    cutoff_time = datetime.now(timezone.utc) - timedelta(days=45)
-    filtered_data = [entry for entry in merged_data 
-                    if datetime.fromisoformat(entry['utc'].rstrip('Z')).replace(tzinfo=timezone.utc) >= cutoff_time]
-    
-    # Check for AKST midnight transition in the new data
-    current_date = None
-    previous_date = None
-    
-    for entry in new_data:
-        entry_utc = datetime.fromisoformat(entry['utc'].rstrip('Z')).replace(tzinfo=timezone.utc)
-        entry_date = entry['date']
+        # Ensure the daily directory exists
+        daily_dir = os.path.join('/app/data/wind_watch/daily/2025')
+        os.makedirs(daily_dir, exist_ok=True)
+
+        # Save the data
+        daily_file = os.path.join(daily_dir, f"{station_id}_{date}.json")
         
-        if current_date is None:
-            current_date = entry_date
-        elif entry_date != current_date:
-            # Date change detected
-            previous_date = current_date
-            current_date = entry_date
-            
-            # If we have stats for the previous day, save them to a daily file
-            if previous_date in current_daily_stats:
-                save_daily_statistics(station_id, name, previous_date, current_daily_stats[previous_date])
-    
-    # Get updated daily statistics
-    daily_stats = get_daily_statistics(filtered_data)
-    
-    # No backups needed
-    
-    output_data = {
-        "station": station_id,
-        "name": name,
-        "last_updated": get_time(for_display=True)['timestamp'],
-        "data": filtered_data,
-        "daily_statistics": daily_stats  # Replace daily_max_gusts with comprehensive daily_statistics
-    }
-    
-    with open(output_file, 'w') as f:
-        json.dump(output_data, f, indent=2)
-    
-    logger.info(f"Updated {station_id} data file with {len(filtered_data)} entries")
-    
-    return daily_stats
+        output_data = {
+            'station': {
+                'id': station_id,
+                'name': name
+            },
+            'date': date,
+            'statistics': daily_stats
+        }
+        
+        with open(daily_file, 'w') as f:
+            json.dump(output_data, f, indent=2)
+        
+        logger.info(f"Saved daily statistics to {daily_file}")
+    except Exception as e:
+        logger.error(f"Failed to save daily statistics: {str(e)}")
+        raise
 
 def update_status(station_id, is_online, station_data=None):
     """Update station status and detect offline periods."""
-    status_dir = os.path.join(os.path.dirname(__file__), 'data', 'status')
-    os.makedirs(status_dir, exist_ok=True)
-    status_file = os.path.join(status_dir, f"{station_id}_status.json")
-    
-    current_time = datetime.now(timezone.utc)
-    display_time = get_time(for_display=True)
-    
-    status_data = {}
-    if os.path.exists(status_file):
-        try:
+    try:
+        # Ensure the status directory exists
+        status_dir = os.path.join('/app/data/wind_watch/status')
+        os.makedirs(status_dir, exist_ok=True)
+
+        # Get current time
+        current_time = get_time()
+        display_time = get_time(for_display=True)
+        
+        # Status file path
+        status_file = os.path.join(status_dir, f"{station_id}_status.json")
+        
+        # Load existing status or create new
+        if os.path.exists(status_file):
             with open(status_file, 'r') as f:
                 status_data = json.load(f)
-        except (json.JSONDecodeError, FileNotFoundError):
-            logger.error(f"Error reading status file for {station_id}, creating new one")
-    
-    if not status_data:
-        status_data = {"status": "unknown", "last_online": None, "offline_since": None}
-    
-    if is_online and station_data:
-        latest_utc = datetime.fromisoformat(station_data['utc'].rstrip('Z')).replace(tzinfo=timezone.utc)
-        time_gap = (current_time - latest_utc).total_seconds() / 60
-        
-        if time_gap > 15:
-            if status_data["status"] != "offline":
-                status_data["offline_since"] = (latest_utc + timedelta(minutes=1)).isoformat() + 'Z'
-                status_data["status"] = "offline"
-                logger.warning(f"Station {station_id} data stale by {time_gap:.1f} minutes, marked offline")
         else:
-            status_data["status"] = "online"
-            status_data["last_online"] = display_time['timestamp']
-            if status_data.get("status") == "offline":
+            status_data = {
+                "station_id": station_id,
+                "status": "unknown",
+                "last_update": current_time.isoformat() + 'Z',
+                "last_outage": None,
+                "last_outage_duration": None,
+                "offline_since": None,
+                "data_summary": None
+            }
+        
+        # Update status
+        status_data["last_update"] = current_time.isoformat() + 'Z'
+        
+        if is_online:
+            if status_data["status"] == "offline":
                 offline_since = datetime.fromisoformat(status_data["offline_since"].rstrip('Z')).replace(tzinfo=timezone.utc)
+                status_data["status"] = "online"
+                status_data["last_outage"] = status_data["offline_since"]
+                status_data["offline_since"] = None
                 duration_min = int((current_time - offline_since).total_seconds() / 60)
                 status_data["last_outage_duration"] = f"{duration_min} minutes"
                 logger.info(f"Station {station_id} back online after {duration_min} minutes")
             status_data["data_summary"] = station_data
-    else:
-        if status_data["status"] != "offline":
-            status_data["status"] = "offline"
-            status_data["offline_since"] = current_time.isoformat() + 'Z'
-            logger.warning(f"Station {station_id} marked offline at {display_time['timestamp']}")
-    
-    with open(status_file, 'w') as f:
-        json.dump(status_data, f, indent=2)
-    
-    return status_data["status"]
+        else:
+            if status_data["status"] != "offline":
+                status_data["status"] = "offline"
+                status_data["offline_since"] = current_time.isoformat() + 'Z'
+                logger.warning(f"Station {station_id} marked offline at {display_time['timestamp']}")
+        
+        with open(status_file, 'w') as f:
+            json.dump(status_data, f, indent=2)
+        
+        return status_data["status"]
+    except Exception as e:
+        logger.error(f"Failed to update status: {str(e)}")
+        raise
 
 def check_and_save_daily_files(station_id, name, daily_stats):
     """Check for completed days and save daily statistics files."""
