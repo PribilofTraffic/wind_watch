@@ -1,0 +1,22 @@
+version: '3'
+
+services:
+  wind-watch:
+    build:
+      context: .
+      dockerfile: Dockerfile.v2
+    container_name: wind-watch-v2
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./config:/app/config
+    restart: unless-stopped
+    environment:
+      - TZ=America/Anchorage
+      - PYTHONUNBUFFERED=1
+    healthcheck:
+      test: ["CMD", "ls", "/app/logs"]
+      interval: 1m
+      timeout: 10s
+      retries: 3
+      start_period: 30s
