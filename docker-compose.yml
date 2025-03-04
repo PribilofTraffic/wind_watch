@@ -4,9 +4,12 @@ services:
   wind-watch:
     build:
       context: .
-      dockerfile: Dockerfile.v2
-    container_name: wind-watch-v2
+      dockerfile: Dockerfile
+    networks:
+      - airport_service_airport_internal  
+    container_name: wind-watch
     volumes:
+      - /var/www/html/pribiloftraffic/docker_data/wind_watch:/var/www/html/pribiloftraffic/docker_data/wind_watch
       - ./data:/app/data
       - ./logs:/app/logs
       - ./config:/app/config
