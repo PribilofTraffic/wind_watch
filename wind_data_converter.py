@@ -3,6 +3,7 @@ import json
 import os
 import logging
 import logging.handlers
+import requests
 from datetime import datetime, timezone, timedelta
 import requests
 import time
@@ -141,7 +142,8 @@ def process_45day_data(url, station_id):
             if entry:
                 data.append(entry)
         
-        data.sort(key=lambda x: x['utc'])
+        # Sort in reverse chronological order
+        data.sort(key=lambda x: x['utc'], reverse=True)
         logger.info(f"Fetched {len(data)} entries from 45-day data at {url}")
         return data
     except Exception as e:
@@ -152,7 +154,8 @@ def get_daily_statistics(data):
     """Calculate comprehensive daily statistics for AKST days."""
     daily_stats = {}
     
-    for entry in data:
+    # Process data in reverse chronological order
+    for entry in sorted(data, key=lambda x: x['date'], reverse=True):
         date = entry['date']
         if date not in daily_stats:
             daily_stats[date] = {
@@ -207,7 +210,8 @@ def get_daily_statistics(data):
                     'utc': entry['utc']
                 }
     
-    return daily_stats
+    # Sort the daily stats by date in reverse chronological order
+    return dict(sorted(daily_stats.items(), reverse=True))
 
 def save_station_data(station_id, name, new_data):
     """Save station data to wind_watch/2025 JSON file with comprehensive daily statistics."""
@@ -222,8 +226,11 @@ def save_station_data(station_id, name, new_data):
         # Calculate daily statistics
         daily_stats = get_daily_statistics(new_data)
         
-        # Get the latest entry
-        latest_entry = new_data[-1] if new_data else None
+        # Get the latest entry (data is already sorted newest-to-oldest)
+        latest_entry = new_data[0] if new_data else None
+        
+        # Sort daily stats in reverse chronological order
+        sorted_stats = dict(sorted(daily_stats.items(), reverse=True))
         
         # Create the output data structure
         output_data = {
@@ -233,7 +240,7 @@ def save_station_data(station_id, name, new_data):
             },
             'last_update': get_time(for_display=True)['timestamp'],
             'current': latest_entry,
-            'daily_stats': daily_stats
+            'daily_stats': sorted_stats
         }
         
         with open(data_file, 'w') as f:
