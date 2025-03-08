@@ -1,0 +1,21 @@
+  wind-watch:
+    container_name: wind-watch
+    build:
+      context: ./wind_watch
+      dockerfile: Dockerfile
+    networks:
+      - airport_internal
+    volumes:
+      - /var/www/html/pribiloftraffic/docker_data:/app/data
+      - ./wind_watch/logs:/app/logs
+      - ./wind_watch/stations.json:/app/config/stations.json
+    environment:
+      - TZ=America/Anchorage
+      - PYTHONUNBUFFERED=1
+    healthcheck:
+      test: ["CMD", "ls", "/app/logs"]
+      interval: 1m
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
