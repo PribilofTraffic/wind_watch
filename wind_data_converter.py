@@ -26,6 +26,11 @@ file_handler = logging.handlers.TimedRotatingFileHandler(
 file_handler.setFormatter(formatter)
 logger.addHandler(file_handler)
 
+# Also log to stdout so container logs are visible in Dozzle
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(formatter)
+logger.addHandler(console_handler)
+
 def get_time(for_display=False, dt=None):
     """Single source of truth for time."""
     base_time = dt if dt else datetime.now(timezone.utc)
@@ -37,6 +42,28 @@ def get_time(for_display=False, dt=None):
             'timestamp': akst.strftime("%Y-%m-%d %I:%M:%S %p AKST")
         }
     return base_time
+
+def get_stale_threshold_minutes():
+    """Get staleness threshold (minutes) from env, default 30."""
+    try:
+        return int(os.environ.get('STALE_THRESHOLD_MIN', '30'))
+    except ValueError:
+        return 30
+
+def compute_staleness(latest_entry_utc_iso):
+    """Return (is_stale, age_minutes, threshold_min) for the latest entry.
+
+    latest_entry_utc_iso is ISO string with trailing 'Z'.
+    """
+    threshold = get_stale_threshold_minutes()
+    now = datetime.now(timezone.utc)
+    try:
+        latest_dt = datetime.fromisoformat(latest_entry_utc_iso.rstrip('Z')).replace(tzinfo=timezone.utc)
+        age_minutes = int((now - latest_dt).total_seconds() / 60)
+        return (age_minutes > threshold, age_minutes, threshold)
+    except Exception:
+        # If we cannot parse, treat as stale
+        return (True, None, threshold)
 
 def load_config():
     """Load station configuration from JSON file."""
@@ -228,6 +255,21 @@ def save_station_data(station_id, name, new_data):
         
         # Get the latest entry (data is already sorted newest-to-oldest)
         latest_entry = new_data[0] if new_data else None
+
+        # Compute staleness metadata
+        if latest_entry:
+            is_stale, age_minutes, threshold_min = compute_staleness(latest_entry['utc'])
+            stale_meta = {
+                'is_stale': is_stale,
+                'age_minutes': age_minutes,
+                'threshold_min': threshold_min
+            }
+        else:
+            stale_meta = {
+                'is_stale': True,
+                'age_minutes': None,
+                'threshold_min': get_stale_threshold_minutes()
+            }
         
         # Sort daily stats in reverse chronological order
         sorted_stats = dict(sorted(daily_stats.items(), reverse=True))
@@ -240,6 +282,8 @@ def save_station_data(station_id, name, new_data):
             },
             'last_update': get_time(for_display=True)['timestamp'],
             'current': latest_entry,
+            'status': 'offline' if stale_meta.get('is_stale') else 'online',
+            'stale': stale_meta,
             'daily_stats': sorted_stats
         }
         
@@ -366,8 +410,9 @@ def main():
                 if data_45day:
                     daily_stats = save_station_data(station_id, station['name'], data_45day)
                     check_and_save_daily_files(station_id, station['name'], daily_stats)
-                    latest_data = data_45day[-1]
-                    update_status(station_id, True, latest_data)
+                    latest_data = data_45day[0]
+                    is_stale, age_minutes, threshold_min = compute_staleness(latest_data['utc'])
+                    update_status(station_id, not is_stale, latest_data if not is_stale else None)
                     logger.info(f"Updated {station_id} with {len(data_45day)} entries")
                 else:
                     logger.error(f"No data found for {station_id}")
@@ -391,8 +436,9 @@ def main():
                     if data_45day:
                         daily_stats = save_station_data(station_id, station['name'], data_45day)
                         check_and_save_daily_files(station_id, station['name'], daily_stats)
-                        latest_data = data_45day[-1]
-                        update_status(station_id, True, latest_data)
+                        latest_data = data_45day[0]
+                        is_stale, age_minutes, threshold_min = compute_staleness(latest_data['utc'])
+                        update_status(station_id, not is_stale, latest_data if not is_stale else None)
                         logger.info(f"Updated {station_id} with {len(data_45day)} entries")
                     else:
                         logger.error(f"No data found for {station_id}")
