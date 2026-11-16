@@ -241,10 +241,12 @@ def get_daily_statistics(data):
     return dict(sorted(daily_stats.items(), reverse=True))
 
 def save_station_data(station_id, name, new_data):
-    """Save station data to wind_watch/2025 JSON file with comprehensive daily statistics."""
+    """Save station data to wind_watch/YYYY JSON file with comprehensive daily statistics."""
     try:
+        # Determine the year from the latest data entry
+        current_year = datetime.now(timezone.utc).year
         # Ensure the wind_watch directory exists
-        data_dir = os.path.join('/app/data/wind_watch/2025')
+        data_dir = os.path.join(f'/app/data/wind_watch/{current_year}')
         os.makedirs(data_dir, exist_ok=True)
 
         # Save the data
@@ -298,11 +300,13 @@ def save_station_data(station_id, name, new_data):
 
 def save_daily_statistics(station_id, name, date, daily_stats):
     """Save daily statistics to a JSON file in the format:
-    wind_watch/daily/2025/[station_id]_[YYYY-MM-DD].json
+    wind_watch/daily/YYYY/[station_id]_[YYYY-MM-DD].json
     """
     try:
+        # Extract year from the date (YYYY-MM-DD format)
+        year = date.split('-')[0]
         # Ensure the daily directory exists
-        daily_dir = os.path.join('/app/data/wind_watch/daily/2025')
+        daily_dir = os.path.join(f'/app/data/wind_watch/daily/{year}')
         os.makedirs(daily_dir, exist_ok=True)
 
         # Save the data
