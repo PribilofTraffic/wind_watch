@@ -2,16 +2,16 @@
 
 A small Docker service that follows the wind at two weather stations in the Pribilof Islands, Alaska. Every ten minutes it reads the public observations from the NOAA National Data Buoy Center (NDBC), converts them to the units people here use, and writes plain JSON files that a website can read.
 
-It was written for St. Paul Island and St. George Island. The station list is a config file, so it should work for any NDBC station that publishes standard meteorological data, but only these two have been run.
+It was written for St. Paul Island and St. George Island, but nothing in it is tied to them. The station list is a small config file, so you can point it at any NDBC station that publishes standard meteorological data: see [Using your own stations](#using-your-own-stations).
 
 ## What it does
 
-- Fetches each station's `realtime2` text file from NDBC (about 45 days of observations).
+- Fetches each station's `realtime2` text file from NDBC (about 45 days of observations), and skips the download when NDBC has nothing newer than last time.
 - Converts wind from m/s to knots and temperature from °C to °F, adds a compass direction (`SE`) next to the degrees, and works out wind chill.
 - Shows times in local time with the right label for the season (AKST in winter, AKDT in summer). Every reading also carries its UTC time.
 - Keeps daily highs and lows for each station: strongest wind, strongest gust, warmest, coldest, lowest wind chill. Days start at local midnight.
 - Writes one archive file per station per finished day, so history outlives NDBC's 45-day window.
-- Marks a station `offline` when its newest reading is more than 30 minutes old, and records when the outage began and how long the last one lasted.
+- Marks a station `offline` when its newest reading is too old (30 minutes unless you set otherwise), and records when the outage began and how long the last one lasted.
 - When a fetch fails, works out whose end the problem is on (see "When something goes wrong").
 
 It only writes files. It does not serve a web API.
@@ -45,7 +45,39 @@ docker compose up -d
 
 Files appear under `./data/wind_watch/` within a few seconds. `docker compose ps` shows the container as `healthy` after about a minute.
 
-To follow different stations, edit `stations.json` and restart the container. Station pages and ids are listed at <https://www.ndbc.noaa.gov/>.
+Out of the box it follows the two Pribilof stations. The next section shows how to follow yours.
+
+## Using your own stations
+
+1. Find your station on the map at <https://www.ndbc.noaa.gov/> and note its id (for example `44013` for the Boston approach buoy, or `BURL1` for Southwest Pass, Louisiana).
+2. Check that it reports wind: `https://www.ndbc.noaa.gov/data/realtime2/<ID>.txt` should open and show rows of numbers.
+3. Put the ids in `stations.json`:
+
+   ```json
+   {
+     "stations": [
+       { "id": "44013", "name": "Boston Approach" },
+       { "id": "BURL1", "name": "Southwest Pass", "stale_threshold_min": 90 }
+     ],
+     "output": { "current": { "update_interval": 600 } }
+   }
+   ```
+
+4. Set `TZ` in `docker-compose.yml` to your own time zone.
+5. Restart: `docker compose up -d --force-recreate`.
+
+Only `id` is required for a station:
+
+| Field | Default | Meaning |
+|---|---|---|
+| `id` | required | the NDBC station id; also the name of the output files |
+| `name` | the id | the name shown in the output |
+| `stale_threshold_min` | `STALE_THRESHOLD_MIN` (30) | minutes without a new reading before this station counts as offline |
+| `source_45day` | NDBC's address for the id | full URL of the observations file, if you need to override it |
+
+**Set `stale_threshold_min` for stations that report hourly.** Many buoys and coastal stations publish once an hour, and NDBC posts each reading some minutes after it was taken. With the 30-minute default such a station shows as offline for much of every hour. 90 is a reasonable value for an hourly station.
+
+Things that are fixed: wind is in knots and temperature in °F, and a station that does not report a value (no dewpoint sensor, for example) gets `null` for it.
 
 ## What it writes
 
@@ -100,19 +132,7 @@ A finished day's file is written once. It is rewritten only if its content chang
 
 ## Settings
 
-The station list and the polling interval live in `stations.json`:
-
-```json
-{
-  "stations": [
-    { "id": "PAUA2", "name": "St. Paul",
-      "source_45day": "https://www.ndbc.noaa.gov/data/realtime2/PAUA2.txt" }
-  ],
-  "output": { "current": { "update_interval": 600 } }
-}
-```
-
-`update_interval` is in seconds. NDBC publishes these stations about every ten minutes, so a shorter interval only fetches the same file again.
+The station list (see above) and the polling interval live in `stations.json`. `update_interval` is in seconds. NDBC refreshes its files about every ten minutes, so a shorter interval only asks for the same file again.
 
 The rest are environment variables, all optional:
 
@@ -122,8 +142,9 @@ The rest are environment variables, all optional:
 | `USER_AGENT` | `wind-watch-collector/1.1` | how the service identifies itself to NDBC |
 | `FETCH_TIMEOUT` | `30` | seconds to wait for NDBC on each try |
 | `FETCH_RETRIES` | `3` | tries per station per cycle |
-| `STALE_THRESHOLD_MIN` | `30` | a reading older than this many minutes marks the station offline |
+| `STALE_THRESHOLD_MIN` | `30` | a reading older than this many minutes marks the station offline (a station's own `stale_threshold_min` wins) |
 | `BACKFILL_DAYS` | `3` | how many days back a finished archive file may still be rewritten |
+| `NDBC_URL` | `https://www.ndbc.noaa.gov/data/realtime2/{id}.txt` | where a station's file is found when `stations.json` gives no URL |
 | `CONNECTIVITY_PROBES` | `1.1.1.1:443,8.8.8.8:53` | hosts used to check that our own internet is up |
 | `DNS_PROBE_HOST` | `dns.google` | name used to check that DNS works |
 
@@ -162,3 +183,7 @@ The paths `/app/config/stations.json` and `/app/data` are fixed in the code, so 
 ## Data source
 
 Observations come from the [NOAA National Data Buoy Center](https://www.ndbc.noaa.gov/). This project is not affiliated with NOAA.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

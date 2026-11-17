@@ -7,7 +7,7 @@
 #   docker compose up -d
 #
 # Output appears in ./data/wind_watch within a few seconds.
-# To follow other NDBC stations, edit stations.json and restart.
+# To follow other NDBC stations, edit stations.json (see the README) and restart.
 
 services:
   wind-watch:

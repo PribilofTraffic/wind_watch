@@ -24,6 +24,19 @@ FETCH_RETRIES = int(os.environ.get('FETCH_RETRIES', '3'))
 # (so late-arriving observations are picked up). Older files are never touched.
 BACKFILL_DAYS = int(os.environ.get('BACKFILL_DAYS', '3'))
 
+# Where a station's observations live when stations.json gives no URL.
+NDBC_URL = os.environ.get(
+    'NDBC_URL', 'https://www.ndbc.noaa.gov/data/realtime2/{id}.txt')
+
+# Per-station staleness limits from stations.json ("stale_threshold_min"):
+# station id -> minutes. Stations not listed use STALE_THRESHOLD_MIN.
+STALE_OVERRIDES = {}
+
+# What NDBC last sent for each station: station id -> (Last-Modified, parsed
+# entries). Lets the next cycle ask "anything newer than this?" and skip the
+# download and the parsing when the answer is no.
+FETCH_CACHE = {}
+
 # Why the last fetch for each station failed: station id -> (cause, detail),
 # as worked out by diagnose.py. Empty when the last fetch worked.
 LAST_FAILURE = {}
@@ -76,20 +89,28 @@ def write_json(path, data):
     os.replace(tmp, path)
 
 
-def fetch_text(url):
-    """GET a URL with a timeout and a few retries; return the body text.
+def fetch_text(url, if_modified_since=None):
+    """GET a URL with a timeout and a few retries.
+
+    Returns (text, last_modified). If if_modified_since is given and the
+    source has nothing newer (HTTP 304), returns (None, if_modified_since)
+    without downloading the body.
 
     Retries network errors and 5xx answers with a growing pause. Raises the
     last error if every try fails.
     """
+    headers = {'User-Agent': USER_AGENT}
+    if if_modified_since:
+        headers['If-Modified-Since'] = if_modified_since
     last_error = None
     for attempt in range(1, FETCH_RETRIES + 1):
         try:
-            response = requests.get(url, timeout=FETCH_TIMEOUT,
-                                    headers={'User-Agent': USER_AGENT})
+            response = requests.get(url, timeout=FETCH_TIMEOUT, headers=headers)
+            if response.status_code == 304:
+                return None, if_modified_since
             if response.status_code < 500:
                 response.raise_for_status()
-                return response.text
+                return response.text, response.headers.get('Last-Modified')
             last_error = requests.HTTPError(
                 f"{response.status_code} from {url}", response=response)
         except requests.HTTPError as e:
@@ -100,19 +121,22 @@ def fetch_text(url):
             time.sleep(5 * attempt)
     raise last_error
 
-def get_stale_threshold_minutes():
-    """Get staleness threshold (minutes) from env, default 30."""
+def get_stale_threshold_minutes(station_id=None):
+    """Staleness threshold in minutes: the station's own setting from
+    stations.json if it has one, otherwise STALE_THRESHOLD_MIN (default 30)."""
+    if station_id in STALE_OVERRIDES:
+        return STALE_OVERRIDES[station_id]
     try:
         return int(os.environ.get('STALE_THRESHOLD_MIN', '30'))
     except ValueError:
         return 30
 
-def compute_staleness(latest_entry_utc_iso):
+def compute_staleness(latest_entry_utc_iso, station_id=None):
     """Return (is_stale, age_minutes, threshold_min) for the latest entry.
 
     latest_entry_utc_iso is ISO string with trailing 'Z'.
     """
-    threshold = get_stale_threshold_minutes()
+    threshold = get_stale_threshold_minutes(station_id)
     now = datetime.now(timezone.utc)
     try:
         latest_dt = datetime.fromisoformat(latest_entry_utc_iso.rstrip('Z')).replace(tzinfo=timezone.utc)
@@ -128,8 +152,16 @@ def load_config():
         config_path = os.path.join('/app/config/stations.json')
         with open(config_path, 'r') as f:
             config = json.load(f)
-            logger.info("Successfully loaded station configuration")
-            return config
+        for station in config['stations']:
+            # Only "id" is required. The name defaults to the id and the URL
+            # to NDBC's standard address for that id.
+            station.setdefault('name', station['id'])
+            if not station.get('source_45day'):
+                station['source_45day'] = NDBC_URL.format(id=station['id'])
+            if station.get('stale_threshold_min') is not None:
+                STALE_OVERRIDES[station['id']] = int(station['stale_threshold_min'])
+        logger.info("Successfully loaded station configuration")
+        return config
     except Exception as e:
         logger.error(f"Failed to load configuration: {str(e)}")
         raise
@@ -216,7 +248,13 @@ def process_45day_data(url, station_id):
     """Process 45-day data from NDBC realtime2 URL."""
     LAST_FAILURE.pop(station_id, None)
     try:
-        text = fetch_text(url)
+        cached_modified, cached_data = FETCH_CACHE.get(station_id, (None, None))
+        text, last_modified = fetch_text(url, cached_modified)
+        if text is None:
+            # 304: NDBC has nothing newer than what we parsed last time.
+            logger.info(f"No change at NDBC for {station_id} since {cached_modified}; "
+                        f"reusing {len(cached_data)} entries")
+            return cached_data
 
         data = []
         lines = text.splitlines()[2:]
@@ -240,6 +278,10 @@ def process_45day_data(url, station_id):
         # Sort in reverse chronological order
         data.sort(key=lambda x: x['utc'], reverse=True)
         logger.info(f"Fetched {len(data)} entries from 45-day data at {url}")
+        if data and last_modified:
+            FETCH_CACHE[station_id] = (last_modified, data)
+        else:
+            FETCH_CACHE.pop(station_id, None)
         return data
     except Exception as e:
         LAST_FAILURE[station_id] = diagnose.classify_failure(e)
@@ -330,7 +372,7 @@ def save_station_data(station_id, name, new_data):
 
         # Compute staleness metadata
         if latest_entry:
-            is_stale, age_minutes, threshold_min = compute_staleness(latest_entry['utc'])
+            is_stale, age_minutes, threshold_min = compute_staleness(latest_entry['utc'], station_id)
             stale_meta = {
                 'is_stale': is_stale,
                 'age_minutes': age_minutes,
@@ -340,7 +382,7 @@ def save_station_data(station_id, name, new_data):
             stale_meta = {
                 'is_stale': True,
                 'age_minutes': None,
-                'threshold_min': get_stale_threshold_minutes()
+                'threshold_min': get_stale_threshold_minutes(station_id)
             }
         
         # Sort daily stats in reverse chronological order
@@ -506,7 +548,7 @@ def mark_station_file_stale(station_id):
         latest = output_data.get('current')
         if not latest:
             return
-        is_stale, age_minutes, threshold_min = compute_staleness(latest['utc'])
+        is_stale, age_minutes, threshold_min = compute_staleness(latest['utc'], station_id)
         new_status = 'offline' if is_stale else 'online'
         new_stale = {'is_stale': is_stale, 'age_minutes': age_minutes, 'threshold_min': threshold_min}
         if output_data.get('status') == new_status and output_data.get('stale') == new_stale:
@@ -529,7 +571,7 @@ def process_station(station):
             daily_stats = save_station_data(station_id, station['name'], data_45day)
             check_and_save_daily_files(station_id, station['name'], daily_stats)
             latest_data = data_45day[0]
-            is_stale, age_minutes, threshold_min = compute_staleness(latest_data['utc'])
+            is_stale, age_minutes, threshold_min = compute_staleness(latest_data['utc'], station_id)
             if is_stale:
                 # NDBC answered, but the station itself has gone quiet:
                 # its sensor, power or satellite link.
