@@ -4,10 +4,29 @@ import os
 import logging
 import logging.handlers
 import requests
-from datetime import datetime, timezone, timedelta
-import requests
+from datetime import datetime, timezone, timedelta, date as date_type
+from zoneinfo import ZoneInfo
 import time
 import sys
+
+import diagnose
+
+# --- Settings (environment) --------------------------------------------------
+# Local time zone for every date and time shown in the output. A named zone
+# (not a fixed offset) means the switch between AKST and AKDT happens on its
+# own, and a change in the law reaches us through the time zone database.
+LOCAL_TZ = ZoneInfo(os.environ.get('TZ') or 'America/Anchorage')
+# How the service identifies itself to NDBC.
+USER_AGENT = os.environ.get('USER_AGENT', 'wind-watch-collector/1.1')
+FETCH_TIMEOUT = int(os.environ.get('FETCH_TIMEOUT', '30'))   # seconds per try
+FETCH_RETRIES = int(os.environ.get('FETCH_RETRIES', '3'))
+# A finished day's archive file is rewritten only while the day is this recent
+# (so late-arriving observations are picked up). Older files are never touched.
+BACKFILL_DAYS = int(os.environ.get('BACKFILL_DAYS', '3'))
+
+# Why the last fetch for each station failed: station id -> (cause, detail),
+# as worked out by diagnose.py. Empty when the last fetch worked.
+LAST_FAILURE = {}
 
 # Configure logging
 log_dir = os.path.join(os.path.dirname(__file__), 'logs')
@@ -35,13 +54,51 @@ def get_time(for_display=False, dt=None):
     """Single source of truth for time."""
     base_time = dt if dt else datetime.now(timezone.utc)
     if for_display:
-        akst = base_time - timedelta(hours=9)
+        # Real Alaska local time with the right label for that moment:
+        # AKST in winter, AKDT in summer. (This used to be a fixed UTC-9
+        # labelled "AKST" all year, an hour behind the clock every summer.)
+        local = base_time.astimezone(LOCAL_TZ)
+        zone = local.strftime("%Z")
         return {
-            'date': akst.strftime("%Y-%m-%d"),
-            'time': akst.strftime("%I:%M:%S %p AKST"),
-            'timestamp': akst.strftime("%Y-%m-%d %I:%M:%S %p AKST")
+            'date': local.strftime("%Y-%m-%d"),
+            'time': local.strftime("%I:%M:%S %p ") + zone,
+            'timestamp': local.strftime("%Y-%m-%d %I:%M:%S %p ") + zone
         }
     return base_time
+
+
+def write_json(path, data):
+    """Write JSON to a temp file, then rename it over the target, so a
+    reader (web server, cron copy) never sees a half-written file."""
+    tmp = f"{path}.tmp"
+    with open(tmp, 'w') as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp, path)
+
+
+def fetch_text(url):
+    """GET a URL with a timeout and a few retries; return the body text.
+
+    Retries network errors and 5xx answers with a growing pause. Raises the
+    last error if every try fails.
+    """
+    last_error = None
+    for attempt in range(1, FETCH_RETRIES + 1):
+        try:
+            response = requests.get(url, timeout=FETCH_TIMEOUT,
+                                    headers={'User-Agent': USER_AGENT})
+            if response.status_code < 500:
+                response.raise_for_status()
+                return response.text
+            last_error = requests.HTTPError(
+                f"{response.status_code} from {url}", response=response)
+        except requests.HTTPError as e:
+            raise e  # a 4xx: asking again will not change it
+        except requests.RequestException as e:
+            last_error = e
+        if attempt < FETCH_RETRIES:
+            time.sleep(5 * attempt)
+    raise last_error
 
 def get_stale_threshold_minutes():
     """Get staleness threshold (minutes) from env, default 30."""
@@ -157,24 +214,37 @@ def parse_line(line):
 
 def process_45day_data(url, station_id):
     """Process 45-day data from NDBC realtime2 URL."""
+    LAST_FAILURE.pop(station_id, None)
     try:
-        response = requests.get(url)
-        response.raise_for_status()
-        
+        text = fetch_text(url)
+
         data = []
-        lines = response.text.splitlines()[2:]
+        lines = text.splitlines()[2:]
         
         for line in lines:
             entry = parse_line(line)
             if entry:
                 data.append(entry)
+
+        if not data:
+            # NDBC answered but nothing usable came back.
+            if lines:
+                LAST_FAILURE[station_id] = (
+                    diagnose.OUR_ERROR,
+                    f'{len(lines)} lines received but none could be parsed (format changed?)')
+            else:
+                LAST_FAILURE[station_id] = (
+                    diagnose.SOURCE_STALE,
+                    'NDBC has no observations from this station in its 45-day file')
         
         # Sort in reverse chronological order
         data.sort(key=lambda x: x['utc'], reverse=True)
         logger.info(f"Fetched {len(data)} entries from 45-day data at {url}")
         return data
     except Exception as e:
+        LAST_FAILURE[station_id] = diagnose.classify_failure(e)
         logger.error(f"Failed to fetch 45-day data from {url} for {station_id}: {str(e)}")
+        logger.warning(f"Diagnosis for {station_id}: {diagnose.describe(*LAST_FAILURE[station_id])}")
         return []
 
 def get_daily_statistics(data):
@@ -289,8 +359,7 @@ def save_station_data(station_id, name, new_data):
             'daily_stats': sorted_stats
         }
         
-        with open(data_file, 'w') as f:
-            json.dump(output_data, f, indent=2)
+        write_json(data_file, output_data)
         
         logger.info(f"Saved {len(new_data)} entries to {data_file}")
         return daily_stats
@@ -299,8 +368,13 @@ def save_station_data(station_id, name, new_data):
         raise
 
 def save_daily_statistics(station_id, name, date, daily_stats):
-    """Save daily statistics to a JSON file in the format:
+    """Save one finished day's statistics to
     wind_watch/daily/YYYY/[station_id]_[YYYY-MM-DD].json
+
+    Returns True if the file was written, False if it was left alone. A file
+    is written when it does not exist yet, or when its content has changed
+    and the day is within the last BACKFILL_DAYS days. Anything older is
+    history and is never rewritten.
     """
     try:
         # Extract year from the date (YYYY-MM-DD format)
@@ -309,7 +383,6 @@ def save_daily_statistics(station_id, name, date, daily_stats):
         daily_dir = os.path.join(f'/app/data/wind_watch/daily/{year}')
         os.makedirs(daily_dir, exist_ok=True)
 
-        # Save the data
         daily_file = os.path.join(daily_dir, f"{station_id}_{date}.json")
         
         output_data = {
@@ -320,17 +393,32 @@ def save_daily_statistics(station_id, name, date, daily_stats):
             'date': date,
             'statistics': daily_stats
         }
-        
-        with open(daily_file, 'w') as f:
-            json.dump(output_data, f, indent=2)
-        
-        logger.info(f"Saved daily statistics to {daily_file}")
+
+        if os.path.exists(daily_file):
+            today = datetime.now(LOCAL_TZ).date()
+            age_days = (today - date_type.fromisoformat(date)).days
+            if age_days > BACKFILL_DAYS:
+                return False
+            try:
+                with open(daily_file, 'r') as f:
+                    if json.load(f) == output_data:
+                        return False
+            except (OSError, ValueError):
+                pass  # unreadable file for a recent day: write a good one
+
+        write_json(daily_file, output_data)
+        return True
     except Exception as e:
         logger.error(f"Failed to save daily statistics: {str(e)}")
         raise
 
-def update_status(station_id, is_online, station_data=None):
-    """Update station status and detect offline periods."""
+def update_status(station_id, is_online, station_data=None, cause=None, detail=None):
+    """Update station status and detect offline periods.
+
+    cause/detail say whose end a problem is on (see diagnose.py) and are
+    written to the status file as "cause" and "cause_detail"; both are null
+    while the station is online.
+    """
     try:
         # Ensure the status directory exists
         status_dir = os.path.join('/app/data/wind_watch/status')
@@ -362,23 +450,28 @@ def update_status(station_id, is_online, station_data=None):
         status_data["last_update"] = current_time.isoformat() + 'Z'
         
         if is_online:
-            if status_data["status"] == "offline":
+            if status_data["status"] == "offline" and status_data.get("offline_since"):
                 offline_since = datetime.fromisoformat(status_data["offline_since"].rstrip('Z')).replace(tzinfo=timezone.utc)
-                status_data["status"] = "online"
                 status_data["last_outage"] = status_data["offline_since"]
                 status_data["offline_since"] = None
                 duration_min = int((current_time - offline_since).total_seconds() / 60)
                 status_data["last_outage_duration"] = f"{duration_min} minutes"
-                logger.info(f"Station {station_id} back online after {duration_min} minutes")
+                logger.info(f"Station {station_id} back online after {duration_min} minutes "
+                            f"(was: {diagnose.describe(status_data.get('cause'))})")
+            status_data["status"] = "online"
             status_data["data_summary"] = station_data
+            status_data["cause"] = None
+            status_data["cause_detail"] = None
         else:
             if status_data["status"] != "offline":
                 status_data["status"] = "offline"
                 status_data["offline_since"] = current_time.isoformat() + 'Z'
-                logger.warning(f"Station {station_id} marked offline at {display_time['timestamp']}")
+                logger.warning(f"Station {station_id} marked offline at {display_time['timestamp']}: "
+                               f"{diagnose.describe(cause, detail)}")
+            status_data["cause"] = cause
+            status_data["cause_detail"] = detail
         
-        with open(status_file, 'w') as f:
-            json.dump(status_data, f, indent=2)
+        write_json(status_file, status_data)
         
         return status_data["status"]
     except Exception as e:
@@ -392,9 +485,68 @@ def check_and_save_daily_files(station_id, name, daily_stats):
     # Find dates that are not today (completed days)
     completed_dates = [date for date in daily_stats.keys() if date != today]
     
-    for date in completed_dates:
-        save_daily_statistics(station_id, name, date, daily_stats[date])
-        logger.info(f"Saved completed day statistics for {station_id} on {date}")
+    written = [date for date in completed_dates
+               if save_daily_statistics(station_id, name, date, daily_stats[date])]
+    if written:
+        logger.info(f"Saved daily statistics for {station_id}: {', '.join(sorted(written))}")
+
+
+def mark_station_file_stale(station_id):
+    """After a failed fetch, bring the station file's status up to date.
+
+    The file keeps its last good reading, but its "status" and "stale"
+    fields were worked out when that reading was fresh. Recompute them from
+    the reading's age so pages stop showing an old reading as "online".
+    """
+    try:
+        year = datetime.now(timezone.utc).year
+        data_file = f'/app/data/wind_watch/{year}/{station_id}.json'
+        with open(data_file, 'r') as f:
+            output_data = json.load(f)
+        latest = output_data.get('current')
+        if not latest:
+            return
+        is_stale, age_minutes, threshold_min = compute_staleness(latest['utc'])
+        new_status = 'offline' if is_stale else 'online'
+        new_stale = {'is_stale': is_stale, 'age_minutes': age_minutes, 'threshold_min': threshold_min}
+        if output_data.get('status') == new_status and output_data.get('stale') == new_stale:
+            return
+        output_data['status'] = new_status
+        output_data['stale'] = new_stale
+        write_json(data_file, output_data)
+    except (OSError, ValueError, KeyError) as e:
+        logger.warning(f"Could not refresh staleness in the {station_id} file: {e}")
+
+
+def process_station(station):
+    """One fetch-and-save pass for one station."""
+    station_id = station['id']
+    logger.info(f"Getting 45-day data for {station_id}")
+    try:
+        data_45day = process_45day_data(station['source_45day'], station_id)
+
+        if data_45day:
+            daily_stats = save_station_data(station_id, station['name'], data_45day)
+            check_and_save_daily_files(station_id, station['name'], daily_stats)
+            latest_data = data_45day[0]
+            is_stale, age_minutes, threshold_min = compute_staleness(latest_data['utc'])
+            if is_stale:
+                # NDBC answered, but the station itself has gone quiet:
+                # its sensor, power or satellite link.
+                update_status(station_id, False, None, diagnose.SOURCE_STALE,
+                              f'newest observation is {age_minutes} minutes old')
+            else:
+                update_status(station_id, True, latest_data)
+            logger.info(f"Updated {station_id} with {len(data_45day)} entries")
+        else:
+            cause, detail = LAST_FAILURE.get(station_id, (None, None))
+            logger.error(f"No data found for {station_id}")
+            mark_station_file_stale(station_id)
+            update_status(station_id, False, None, cause, detail)
+    except Exception as e:
+        logger.error(f"Error processing station {station_id}: {str(e)}")
+        update_status(station_id, False, None, diagnose.OUR_ERROR,
+                      f'{type(e).__name__}: {e}'[:200])
 
 def main():
     """Main function to process wind data."""
@@ -405,51 +557,17 @@ def main():
     
     if len(sys.argv) > 1 and sys.argv[1] == "--test":
         logger.info("Running in test mode - single iteration")
-        try:
-            for station in config['stations']:
-                station_id = station['id']
-                logger.info(f"Getting 45-day data for {station_id}")
-                data_45day = process_45day_data(station['source_45day'], station_id)
-                
-                if data_45day:
-                    daily_stats = save_station_data(station_id, station['name'], data_45day)
-                    check_and_save_daily_files(station_id, station['name'], daily_stats)
-                    latest_data = data_45day[0]
-                    is_stale, age_minutes, threshold_min = compute_staleness(latest_data['utc'])
-                    update_status(station_id, not is_stale, latest_data if not is_stale else None)
-                    logger.info(f"Updated {station_id} with {len(data_45day)} entries")
-                else:
-                    logger.error(f"No data found for {station_id}")
-                    update_status(station_id, False)
-            logger.info("Test run completed successfully")
-            return
-        except Exception as e:
-            logger.error(f"Error in test mode: {str(e)}")
-            raise
+        for station in config['stations']:
+            process_station(station)
+        logger.info("Test run completed successfully")
+        return
     
     while True:
         try:
             start_time = time.time()
             
             for station in config['stations']:
-                station_id = station['id']
-                logger.info(f"Getting 45-day data for {station_id}")
-                try:
-                    data_45day = process_45day_data(station['source_45day'], station_id)
-                    
-                    if data_45day:
-                        daily_stats = save_station_data(station_id, station['name'], data_45day)
-                        check_and_save_daily_files(station_id, station['name'], daily_stats)
-                        latest_data = data_45day[0]
-                        is_stale, age_minutes, threshold_min = compute_staleness(latest_data['utc'])
-                        update_status(station_id, not is_stale, latest_data if not is_stale else None)
-                        logger.info(f"Updated {station_id} with {len(data_45day)} entries")
-                    else:
-                        logger.error(f"No data found for {station_id}")
-                        update_status(station_id, False)
-                except Exception as e:
-                    logger.error(f"Error processing station {station_id}: {str(e)}")
-                    update_status(station_id, False)
+                process_station(station)
             
             elapsed = time.time() - start_time
             sleep_time = max(0, update_interval - elapsed)
