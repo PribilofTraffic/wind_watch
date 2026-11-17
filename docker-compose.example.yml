@@ -1,0 +1,42 @@
+# Example Docker Compose file for Wind Watch.
+#
+# Quick start:
+#   git clone https://github.com/PribilofTraffic/wind_watch.git
+#   cd wind_watch
+#   cp docker-compose.example.yml docker-compose.yml
+#   docker compose up -d
+#
+# Output appears in ./data/wind_watch within a few seconds.
+# To follow other NDBC stations, edit stations.json and restart.
+
+services:
+  wind-watch:
+    build: .
+    container_name: wind-watch
+    restart: unless-stopped
+    volumes:
+      # Output: current readings, station status and the daily archive.
+      - ./data:/app/data
+      # Log files (also visible with: docker compose logs -f wind-watch).
+      - ./logs:/app/logs
+      # Station list and polling interval, read at start-up.
+      - ./stations.json:/app/config/stations.json:ro
+    environment:
+      # Your time zone. Displayed times and the start of each day follow it,
+      # including the switch between standard and daylight time.
+      # List: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
+      - TZ=America/Anchorage
+      - PYTHONUNBUFFERED=1
+
+      # How the service identifies itself to NDBC. A name and a contact
+      # address is the polite form, for example:
+      # - USER_AGENT=wind-watch-collector/1.1 (you@example.com)
+
+      # Optional tuning, shown with the defaults:
+      # - FETCH_TIMEOUT=30         # seconds to wait for NDBC on each try
+      # - FETCH_RETRIES=3          # tries per station per cycle
+      # - STALE_THRESHOLD_MIN=30   # minutes before a station counts as offline
+      # - BACKFILL_DAYS=3          # days a finished archive file may still change
+    # Plenty for two stations; the service idles between cycles.
+    mem_limit: 128m
+    cpus: 0.5
