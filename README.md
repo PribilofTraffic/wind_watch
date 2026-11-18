@@ -4,6 +4,18 @@ A small Docker service that follows the wind at two weather stations in the Prib
 
 It was written for St. Paul Island and St. George Island, but nothing in it is tied to them. The station list is a small config file, so you can point it at any NDBC station that publishes standard meteorological data: see [Using your own stations](#using-your-own-stations).
 
+## On pribiloftraffic.com
+
+The JSON files show up on three pages. [Island Battle](https://www.pribiloftraffic.com/pribobs/) puts the two stations side by side. [St. Paul weather](https://www.pribiloftraffic.com/snpweather/) reads PAUA2, and [St. George weather](https://www.pribiloftraffic.com/stgweather/) reads SGXA2.
+
+As the pages looked on the afternoon of 18 Nov 2026.
+
+![Island Battle: St. George 39.1 knots from the southwest, St. Paul 34 knots from the west-southwest.](docs/site/island-battle.png)
+
+![St. Paul weather, PAUA2: 34 knots, gusting 48, wind chill 22°F.](docs/site/st-paul-wind.png)
+
+![St. George weather, SGXA2: 39.1 knots, gusting 55, wind chill 17°F.](docs/site/st-george-wind.png)
+
 ## What it does
 
 - Fetches each station's `realtime2` text file from NDBC (about 45 days of observations), and skips the download when NDBC has nothing newer than last time.
