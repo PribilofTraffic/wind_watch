@@ -16,6 +16,8 @@ As the pages looked on the afternoon of 18 Nov 2026.
 
 ![St. George weather, SGXA2: 39.1 knots, gusting 55, wind chill 17°F.](docs/site/st-george-wind.png)
 
+The Docker setup on the island started from the SDR Enthusiasts guide, [ADS-B Reception, Decoding & Sharing with Docker](https://sdr-enthusiasts.gitbook.io/ads-b).
+
 ## What it does
 
 - Fetches each station's `realtime2` text file from NDBC (about 45 days of observations), and skips the download when NDBC has nothing newer than last time.
