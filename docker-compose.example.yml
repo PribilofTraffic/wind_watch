@@ -13,7 +13,7 @@ services:
   wind-watch:
     build: .
     container_name: wind-watch
-    restart: unless-stopped
+    restart: always
     volumes:
       # Output: current readings, station status and the daily archive.
       - ./data:/app/data
